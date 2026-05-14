@@ -1,23 +1,43 @@
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use rayon::prelude::*;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use walkdir::WalkDir;
 
+mod context_menu;
 mod launch;
+
+#[derive(Subcommand, Debug, Clone)]
+enum MenuCmd {
+    /// フォルダ右クリックに「yeetdir で削除…」を追加（現在の exe を現ユーザーに登録）
+    InstallContextMenu,
+    /// 右クリックの登録を削除
+    UninstallContextMenu,
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "yeetdir",
     about = "フォルダ配下を並列で削除します",
-    after_help = "Windows: エクスプローラーにフォルダを yeetdir.exe へドラッグした起動では、親が explorer.exe のときフォルダ本体も消します。cmd / PowerShell などからは従来どおり中身だけです（本体も消すときは -r）。中身だけにしたいドラッグには --contents-only。"
+    args_conflicts_with_subcommands = true,
+    after_help = "Windows: エクスプローラーにフォルダを yeetdir.exe へドラッグした起動では、親が explorer.exe のときフォルダ本体も消します。cmd / PowerShell などからは従来どおり中身だけです（本体も消すときは -r）。中身だけにしたいドラッグには --contents-only。\n\
+\n\
+右クリック: yeetdir install-context-menu で登録、uninstall-context-menu で解除。"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<MenuCmd>,
+    #[command(flatten)]
+    del: DeleteOptions,
+}
+
+#[derive(Args, Debug)]
+struct DeleteOptions {
     /// 削除対象のディレクトリ（複数可）
-    #[arg(value_name = "PATH", required = true)]
+    #[arg(value_name = "PATH")]
     paths: Vec<PathBuf>,
     /// 中身が空になったあと、指定したディレクトリ自体も消す
     #[arg(short = 'r', long, conflicts_with = "contents_only")]
@@ -258,9 +278,51 @@ fn run_delete_one(
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    let use_progress = !cli.no_progress && (cli.progress || std::io::stderr().is_terminal());
+    match &cli.command {
+        Some(MenuCmd::InstallContextMenu) => {
+            return match context_menu::install() {
+                Ok(()) => {
+                    eprintln!("登録しました。エクスプローラーでフォルダを右クリックしてください。");
+                    eprintln!("（Windows 11 では [さらに表示] の中に出ることがあります）");
+                    eprintln!("exe を移したら、もう一度 install-context-menu を実行してください。");
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("登録に失敗しました: {e}");
+                    std::process::ExitCode::from(1)
+                }
+            };
+        }
+        Some(MenuCmd::UninstallContextMenu) => {
+            return match context_menu::uninstall() {
+                Ok(()) => {
+                    eprintln!("右クリックの登録を消しました。");
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("登録が見つかりませんでした（未登録か、すでに削除済み）。");
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("登録の削除に失敗しました: {e}");
+                    std::process::ExitCode::from(1)
+                }
+            };
+        }
+        None => {}
+    }
+
+    if cli.del.paths.is_empty() {
+        eprintln!("削除するフォルダの PATH を 1 つ以上指定するか、サブコマンドを使ってください。");
+        eprintln!("例: yeetdir install-context-menu");
+        return std::process::ExitCode::from(2);
+    }
+
+    let use_progress = !cli.del.no_progress
+        && (cli.del.progress || std::io::stderr().is_terminal());
 
     let threads = cli
+        .del
         .jobs
         .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
         .unwrap_or(4)
@@ -277,11 +339,11 @@ fn main() -> std::process::ExitCode {
     let multi = use_progress.then(MultiProgress::new);
 
     let from_explorer = launch::launched_from_explorer();
-    let remove_root = cli.remove_root || (from_explorer && !cli.contents_only);
+    let remove_root = cli.del.remove_root || (from_explorer && !cli.del.contents_only);
 
     let mut any_fail = false;
 
-    for root in &cli.paths {
+    for root in &cli.del.paths {
         if !root.exists() {
             eprintln!("そのパスはありません: {}", root.display());
             any_fail = true;
