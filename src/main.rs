@@ -7,23 +7,44 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use walkdir::WalkDir;
 
+mod launch;
+
 #[derive(Parser, Debug)]
-#[command(name = "yeetdir", about = "フォルダ配下を並列で削除します")]
+#[command(
+    name = "yeetdir",
+    about = "フォルダ配下を並列で削除します",
+    after_help = "Windows: エクスプローラーにフォルダを yeetdir.exe へドラッグした起動では、親が explorer.exe のときフォルダ本体も消します。cmd / PowerShell などからは従来どおり中身だけです（本体も消すときは -r）。中身だけにしたいドラッグには --contents-only。"
+)]
 struct Cli {
-    /// 削除対象のディレクトリ
-    path: PathBuf,
+    /// 削除対象のディレクトリ（複数可）
+    #[arg(value_name = "PATH", required = true)]
+    paths: Vec<PathBuf>,
     /// 中身が空になったあと、指定したディレクトリ自体も消す
-    #[arg(short = 'r', long)]
+    #[arg(short = 'r', long, conflicts_with = "contents_only")]
     remove_root: bool,
+    /// エクスプローラー経由の起動でも、中身だけ消してルートフォルダは残す
+    #[arg(long, conflicts_with = "remove_root")]
+    contents_only: bool,
     /// 使うスレッド数。省略時は CPU の並列度に合わせる
     #[arg(short = 'j', long)]
     jobs: Option<usize>,
-    /// 進捗を出す
+    /// 標準エラーが端末じゃないときでも進捗を出す（既定は端末なら出る）
     #[arg(short = 'p', long, action = clap::ArgAction::SetTrue, conflicts_with = "no_progress")]
     progress: bool,
-    /// 進捗を出さない
+    /// 進捗を出さない（端末でもオフにしたいとき）
     #[arg(short = 'q', long, action = clap::ArgAction::SetTrue, conflicts_with = "progress")]
     no_progress: bool,
+}
+
+enum RunOutcome {
+    EnumerateFailed {
+        root: PathBuf,
+        error: std::io::Error,
+    },
+    Done {
+        file_errors: Vec<(PathBuf, std::io::Error)>,
+        dir_errors: Vec<(PathBuf, std::io::Error)>,
+    },
 }
 
 fn depth_key(path: &Path) -> usize {
@@ -142,38 +163,13 @@ fn delete_dirs_by_depth(
     errors
 }
 
-fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
-
-    let use_progress = !cli.no_progress && (cli.progress || std::io::stderr().is_terminal());
-
-    let root = &cli.path;
-    if !root.exists() {
-        eprintln!("そのパスはありません: {}", root.display());
-        return std::process::ExitCode::from(1);
-    }
-    if !root.is_dir() {
-        eprintln!("フォルダを指定してください: {}", root.display());
-        return std::process::ExitCode::from(1);
-    }
-
-    let threads = cli
-        .jobs
-        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
-        .unwrap_or(4)
-        .max(1);
-
-    let pool = match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("スレッドプールを起動できませんでした: {e}");
-            return std::process::ExitCode::from(1);
-        }
-    };
-
-    let multi = use_progress.then(MultiProgress::new);
-
-    let walk_pb = multi.as_ref().map(|m| {
+fn run_delete_one(
+    root: &Path,
+    remove_root: bool,
+    pool: &rayon::ThreadPool,
+    multi: Option<&MultiProgress>,
+) -> RunOutcome {
+    let walk_pb = multi.map(|m| {
         let pb = m.add(ProgressBar::new_spinner());
         pb.set_style(style_spinner_walk());
         pb.set_message("配下を読み取り中");
@@ -187,8 +183,10 @@ fn main() -> std::process::ExitCode {
             if let Some(pb) = &walk_pb {
                 pb.abandon_with_message(format!("列挙に失敗: {e}"));
             }
-            eprintln!("フォルダの列挙に失敗しました: {e}");
-            return std::process::ExitCode::from(1);
+            return RunOutcome::EnumerateFailed {
+                root: root.to_path_buf(),
+                error: e,
+            };
         }
     };
 
@@ -200,7 +198,7 @@ fn main() -> std::process::ExitCode {
         ));
     }
 
-    let file_pb = multi.as_ref().and_then(|m| {
+    let file_pb = multi.and_then(|m| {
         if files.is_empty() {
             return None;
         }
@@ -210,7 +208,7 @@ fn main() -> std::process::ExitCode {
         Some(pb)
     });
 
-    let mut file_errors = delete_files_parallel(&files, &pool, file_pb.clone());
+    let file_errors = delete_files_parallel(&files, &pool, file_pb.clone());
 
     if let Some(pb) = file_pb {
         if file_errors.is_empty() {
@@ -220,7 +218,7 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    let dir_pb = multi.as_ref().and_then(|m| {
+    let dir_pb = multi.and_then(|m| {
         if dirs.is_empty() {
             return None;
         }
@@ -240,32 +238,97 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    if cli.remove_root {
+    if remove_root {
         match std::fs::remove_dir(root) {
             Ok(()) => {
-                if let Some(m) = &multi {
+                if let Some(m) = multi {
                     let _ = m.println(format!("ルートを削除しました — {}", root.display()));
                 }
             }
-            Err(e) => dir_errors.push((root.clone(), e)),
+            Err(e) => dir_errors.push((root.to_path_buf(), e)),
         }
     }
 
-    let fail = !file_errors.is_empty() || !dir_errors.is_empty();
-    for (p, e) in file_errors.drain(..) {
-        eprintln!("ファイルを消せませんでした — {}\n    {e}", p.display());
+    RunOutcome::Done {
+        file_errors,
+        dir_errors,
     }
-    for (p, e) in dir_errors.drain(..) {
-        eprintln!("フォルダを消せませんでした — {}\n    {e}", p.display());
+}
+
+fn main() -> std::process::ExitCode {
+    let cli = Cli::parse();
+
+    let use_progress = !cli.no_progress && (cli.progress || std::io::stderr().is_terminal());
+
+    let threads = cli
+        .jobs
+        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+        .unwrap_or(4)
+        .max(1);
+
+    let pool = match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("スレッドプールを起動できませんでした: {e}");
+            return std::process::ExitCode::from(1);
+        }
+    };
+
+    let multi = use_progress.then(MultiProgress::new);
+
+    let from_explorer = launch::launched_from_explorer();
+    let remove_root = cli.remove_root || (from_explorer && !cli.contents_only);
+
+    let mut any_fail = false;
+
+    for root in &cli.paths {
+        if !root.exists() {
+            eprintln!("そのパスはありません: {}", root.display());
+            any_fail = true;
+            continue;
+        }
+        if !root.is_dir() {
+            eprintln!("フォルダを指定してください: {}", root.display());
+            any_fail = true;
+            continue;
+        }
+
+        if let Some(m) = &multi {
+            let _ = m.println(format!("── {}", root.display()));
+        }
+
+        match run_delete_one(
+            root,
+            remove_root,
+            &pool,
+            multi.as_ref(),
+        ) {
+            RunOutcome::EnumerateFailed { root, error } => {
+                eprintln!("フォルダの列挙に失敗しました — {}\n    {error}", root.display());
+                any_fail = true;
+            }
+            RunOutcome::Done {
+                mut file_errors,
+                mut dir_errors,
+            } => {
+                any_fail |= !file_errors.is_empty() || !dir_errors.is_empty();
+                for (p, e) in file_errors.drain(..) {
+                    eprintln!("ファイルを消せませんでした — {}\n    {e}", p.display());
+                }
+                for (p, e) in dir_errors.drain(..) {
+                    eprintln!("フォルダを消せませんでした — {}\n    {e}", p.display());
+                }
+            }
+        }
     }
 
-    if !fail && use_progress {
+    if !any_fail && use_progress {
         if let Some(m) = &multi {
             let _ = m.println("完了");
         }
     }
 
-    if fail {
+    if any_fail {
         std::process::ExitCode::from(1)
     } else {
         std::process::ExitCode::SUCCESS

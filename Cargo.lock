@@ -521,4 +521,5 @@ dependencies = [
  "indicatif",
  "rayon",
  "walkdir",
+ "windows-sys 0.59.0",
 ]
