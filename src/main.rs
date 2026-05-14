@@ -10,7 +10,7 @@ use walkdir::WalkDir;
 #[derive(Parser, Debug)]
 #[command(name = "yeetdir", about = "フォルダ配下を並列で削除します")]
 struct Cli {
-    /// 消す対象のディレクトリ（配下をまとめて削除）
+    /// 削除対象のディレクトリ
     path: PathBuf,
     /// 中身が空になったあと、指定したディレクトリ自体も消す
     #[arg(short = 'r', long)]
@@ -18,7 +18,7 @@ struct Cli {
     /// 使うスレッド数。省略時は CPU の並列度に合わせる
     #[arg(short = 'j', long)]
     jobs: Option<usize>,
-    /// 進捗を出す（標準エラーが端末じゃないとき用）
+    /// 進捗を出す
     #[arg(short = 'p', long, action = clap::ArgAction::SetTrue, conflicts_with = "no_progress")]
     progress: bool,
     /// 進捗を出さない
