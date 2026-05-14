@@ -22,7 +22,7 @@ struct Cli {
     #[arg(short = 'p', long, action = clap::ArgAction::SetTrue, conflicts_with = "no_progress")]
     progress: bool,
     /// 進捗を出さない
-    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "progress")]
+    #[arg(short = 'q', long, action = clap::ArgAction::SetTrue, conflicts_with = "progress")]
     no_progress: bool,
 }
 
@@ -194,7 +194,7 @@ fn main() -> std::process::ExitCode {
 
     if let Some(pb) = &walk_pb {
         pb.finish_with_message(format!(
-            "列挙した（ファイル {} · フォルダ {}）",
+            "削除対象（ファイル {} · フォルダ {}）",
             files.len(),
             dirs.len()
         ));
