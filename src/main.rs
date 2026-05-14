@@ -12,7 +12,7 @@ mod launch;
 
 #[derive(Subcommand, Debug, Clone)]
 enum MenuCmd {
-    /// フォルダ右クリックに「yeetdir で削除…」を追加（現在の exe を現ユーザーに登録）
+    /// フォルダ右クリックに「yeetdir で削除…」を追加
     InstallContextMenu,
     /// 右クリックの登録を削除
     UninstallContextMenu,
@@ -21,11 +21,11 @@ enum MenuCmd {
 #[derive(Parser, Debug)]
 #[command(
     name = "yeetdir",
-    about = "フォルダ配下を並列で削除します",
+    about = "フォルダと中身をを並列で削除します",
     args_conflicts_with_subcommands = true,
-    after_help = "Windows: エクスプローラーにフォルダを yeetdir.exe へドラッグした起動では、親が explorer.exe のときフォルダ本体も消します。cmd / PowerShell などからは従来どおり中身だけです（本体も消すときは -r）。中身だけにしたいドラッグには --contents-only。\n\
+    after_help = "Windows: エクスプローラーから yeetdir.exe へフォルダをドラックすると、フォルダごと削除を行うことが出来ます\n\
 \n\
-右クリック: yeetdir install-context-menu で登録、uninstall-context-menu で解除。"
+コンテキストメニューへの登録: yeetdir install-context-menu で登録、uninstall-context-menu で解除。"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -48,10 +48,10 @@ struct DeleteOptions {
     /// 使うスレッド数。省略時は CPU の並列度に合わせる
     #[arg(short = 'j', long)]
     jobs: Option<usize>,
-    /// 標準エラーが端末じゃないときでも進捗を出す（既定は端末なら出る）
+    /// 標準エラーがターミナル以外に渡されたときでも進捗を出す
     #[arg(short = 'p', long, action = clap::ArgAction::SetTrue, conflicts_with = "no_progress")]
     progress: bool,
-    /// 進捗を出さない（端末でもオフにしたいとき）
+    /// 進捗を出さない
     #[arg(short = 'q', long, action = clap::ArgAction::SetTrue, conflicts_with = "progress")]
     no_progress: bool,
 }
@@ -192,7 +192,7 @@ fn run_delete_one(
     let walk_pb = multi.map(|m| {
         let pb = m.add(ProgressBar::new_spinner());
         pb.set_style(style_spinner_walk());
-        pb.set_message("配下を読み取り中");
+        pb.set_message("フォルダ内を読み取り中");
         pb.enable_steady_tick(Duration::from_millis(80));
         pb
     });
@@ -201,7 +201,7 @@ fn run_delete_one(
         Ok(x) => x,
         Err(e) => {
             if let Some(pb) = &walk_pb {
-                pb.abandon_with_message(format!("列挙に失敗: {e}"));
+                pb.abandon_with_message(format!("ファイル・フォルダの読み取りに失敗しました: {e}"));
             }
             return RunOutcome::EnumerateFailed {
                 root: root.to_path_buf(),
@@ -234,7 +234,7 @@ fn run_delete_one(
         if file_errors.is_empty() {
             pb.finish_with_message("ファイルを削除しました");
         } else {
-            pb.abandon_with_message(format!("ファイルで {} 件失敗", file_errors.len()));
+            pb.abandon_with_message(format!("ファイル削除で {} 件失敗", file_errors.len()));
         }
     }
 
@@ -254,7 +254,7 @@ fn run_delete_one(
         if dir_errors.is_empty() {
             pb.finish_with_message("フォルダを削除しました");
         } else {
-            pb.abandon_with_message(format!("フォルダで {} 件失敗", dir_errors.len()));
+            pb.abandon_with_message(format!("フォルダ削除で {} 件失敗", dir_errors.len()));
         }
     }
 
@@ -284,7 +284,7 @@ fn main() -> std::process::ExitCode {
                 Ok(()) => {
                     eprintln!("登録しました。エクスプローラーでフォルダを右クリックしてください。");
                     eprintln!("（Windows 11 では [さらに表示] の中に出ることがあります）");
-                    eprintln!("exe を移したら、もう一度 install-context-menu を実行してください。");
+                    eprintln!("実行ファイルを移動した際は、もう一度 install-context-menu を実行してください。");
                     std::process::ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -366,7 +366,7 @@ fn main() -> std::process::ExitCode {
             multi.as_ref(),
         ) {
             RunOutcome::EnumerateFailed { root, error } => {
-                eprintln!("フォルダの列挙に失敗しました — {}\n    {error}", root.display());
+                eprintln!("フォルダの読み取りに失敗しました — {}\n    {error}", root.display());
                 any_fail = true;
             }
             RunOutcome::Done {
@@ -375,10 +375,10 @@ fn main() -> std::process::ExitCode {
             } => {
                 any_fail |= !file_errors.is_empty() || !dir_errors.is_empty();
                 for (p, e) in file_errors.drain(..) {
-                    eprintln!("ファイルを消せませんでした — {}\n    {e}", p.display());
+                    eprintln!("ファイル削除できませんでした — {}\n    {e}", p.display());
                 }
                 for (p, e) in dir_errors.drain(..) {
-                    eprintln!("フォルダを消せませんでした — {}\n    {e}", p.display());
+                    eprintln!("フォルダ削除できませんでした — {}\n    {e}", p.display());
                 }
             }
         }
