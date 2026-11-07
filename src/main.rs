@@ -1,13 +1,11 @@
 use clap::{Args, Parser, Subcommand};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
-use std::collections::BTreeMap;
-use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::PathBuf;
 use std::time::Duration;
-use walkdir::WalkDir;
 
 mod context_menu;
+mod delete;
 mod launch;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -16,15 +14,21 @@ enum MenuCmd {
     InstallContextMenu,
     /// 右クリックの登録を削除
     UninstallContextMenu,
+    /// 右クリックメニューから呼ばれる（複数選択をまとめて 1 回で処理する）
+    #[command(hide = true)]
+    ContextMenuRun { path: PathBuf },
 }
 
 #[derive(Parser, Debug)]
 #[command(
     name = "yeetdir",
-    about = "フォルダと中身をを並列で削除します",
+    about = "フォルダの中身を並列で削除します（ゴミ箱には入りません）",
     args_conflicts_with_subcommands = true,
-    after_help = "Windows: エクスプローラーから yeetdir.exe へフォルダをドラックすると、フォルダごと削除を行うことが出来ます\n\
+    after_help = "削除の前に対象を表示して確認します。確認なしで消すには --yes を付けてください。\n\
+ジャンクション/シンボリックリンクはたどらず、リンク自体だけを消します。\n\
+ドライブのルートやユーザーフォルダなどの保護対象と、その祖先は削除できません。\n\
 \n\
+Windows: エクスプローラーで yeetdir.exe にフォルダをドラッグすると、フォルダごと削除できます。\n\
 コンテキストメニューへの登録: yeetdir install-context-menu で登録、uninstall-context-menu で解除。"
 )]
 struct Cli {
@@ -34,7 +38,7 @@ struct Cli {
     del: DeleteOptions,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 struct DeleteOptions {
     /// 削除対象のディレクトリ（複数可）
     #[arg(value_name = "PATH")]
@@ -45,354 +49,323 @@ struct DeleteOptions {
     /// エクスプローラー経由の起動でも、中身だけ消してルートフォルダは残す
     #[arg(long, conflicts_with = "remove_root")]
     contents_only: bool,
+    /// 削除前の確認を省略する
+    #[arg(short = 'y', long)]
+    yes: bool,
+    /// 失敗したとき、Enter キーが押されるまでウィンドウを閉じない
+    #[arg(long)]
+    pause: bool,
     /// 使うスレッド数。省略時は CPU の並列度に合わせる
     #[arg(short = 'j', long)]
     jobs: Option<usize>,
     /// 標準エラーがターミナル以外に渡されたときでも進捗を出す
-    #[arg(short = 'p', long, action = clap::ArgAction::SetTrue, conflicts_with = "no_progress")]
+    #[arg(short = 'p', long, conflicts_with = "no_progress")]
     progress: bool,
     /// 進捗を出さない
-    #[arg(short = 'q', long, action = clap::ArgAction::SetTrue, conflicts_with = "progress")]
+    #[arg(short = 'q', long, conflicts_with = "progress")]
     no_progress: bool,
 }
 
-enum RunOutcome {
-    EnumerateFailed {
-        root: PathBuf,
-        error: std::io::Error,
-    },
-    Done {
-        file_errors: Vec<(PathBuf, std::io::Error)>,
-        dir_errors: Vec<(PathBuf, std::io::Error)>,
-    },
-}
-
-fn depth_key(path: &Path) -> usize {
-    path.components().count()
-}
-
-fn style_spinner_walk() -> ProgressStyle {
-    ProgressStyle::with_template("{spinner:.blue.bold} [{elapsed_precise}] {wide_msg} · {pos} 件")
-        .unwrap()
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-}
-
-fn style_bar(label: &'static str) -> ProgressStyle {
-    ProgressStyle::with_template(&format!(
-        "{{spinner:.green.bold}} [{{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{human_pos}}/{{human_len}} {label} {{msg}}"
-    ))
-    .unwrap()
-    .progress_chars("=>-")
-}
-
-fn collect_targets(
-    root: &Path,
-    walk_pb: Option<&ProgressBar>,
-) -> std::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    let mut files = Vec::new();
-    let mut dirs = Vec::new();
-    let mut n = 0usize;
-
-    for entry in WalkDir::new(root)
-        .min_depth(1)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path().to_path_buf();
-        if entry.file_type().is_dir() {
-            dirs.push(path);
-        } else {
-            files.push(path);
-        }
-        if let Some(pb) = walk_pb {
-            pb.inc(1);
-            n += 1;
-            if n.is_multiple_of(256) {
-                pb.set_message(format!(
-                    "ファイル {} · フォルダ {}",
-                    files.len(),
-                    dirs.len()
-                ));
-            }
-        }
-    }
-
-    if let Some(pb) = walk_pb {
-        pb.set_message(format!(
-            "ファイル {} · フォルダ {}",
-            files.len(),
-            dirs.len()
-        ));
-    }
-
-    Ok((files, dirs))
-}
-
-fn delete_files_parallel(
-    files: &[PathBuf],
-    pool: &rayon::ThreadPool,
-    pb: Option<ProgressBar>,
-) -> Vec<(PathBuf, std::io::Error)> {
-    pool.install(|| {
-        files
-            .par_iter()
-            .filter_map(|p| match std::fs::remove_file(p) {
-                Ok(()) => {
-                    if let Some(ref bar) = pb {
-                        bar.inc(1);
-                    }
-                    None
-                }
-                Err(e) => Some((p.clone(), e)),
-            })
-            .collect()
-    })
-}
-
-fn delete_dirs_by_depth(
-    dirs: &[PathBuf],
-    pool: &rayon::ThreadPool,
-    pb: Option<ProgressBar>,
-) -> Vec<(PathBuf, std::io::Error)> {
-    let mut by_depth: BTreeMap<usize, Vec<PathBuf>> = BTreeMap::new();
-    for d in dirs {
-        by_depth.entry(depth_key(d)).or_default().push(d.clone());
-    }
-
-    let pb = pb.as_ref();
-    let mut errors = Vec::new();
-    for depth in by_depth.keys().rev() {
-        let batch = by_depth.get(depth).unwrap();
-        let batch_errs: Vec<_> = pool.install(|| {
-            batch
-                .par_iter()
-                .filter_map(|p| match std::fs::remove_dir(p) {
-                    Ok(()) => {
-                        if let Some(bar) = pb {
-                            bar.inc(1);
-                        }
-                        None
-                    }
-                    Err(e) => Some((p.clone(), e)),
-                })
-                .collect()
-        });
-        errors.extend(batch_errs);
-    }
-    errors
-}
-
-fn run_delete_one(
-    root: &Path,
-    remove_root: bool,
-    pool: &rayon::ThreadPool,
-    multi: Option<&MultiProgress>,
-) -> RunOutcome {
-    let walk_pb = multi.map(|m| {
-        let pb = m.add(ProgressBar::new_spinner());
-        pb.set_style(style_spinner_walk());
-        pb.set_message("フォルダ内を読み取り中");
-        pb.enable_steady_tick(Duration::from_millis(80));
-        pb
-    });
-
-    let (files, dirs) = match collect_targets(root, walk_pb.as_ref()) {
-        Ok(x) => x,
-        Err(e) => {
-            if let Some(pb) = &walk_pb {
-                pb.abandon_with_message(format!("ファイル・フォルダの読み取りに失敗しました: {e}"));
-            }
-            return RunOutcome::EnumerateFailed {
-                root: root.to_path_buf(),
-                error: e,
-            };
-        }
-    };
-
-    if let Some(pb) = &walk_pb {
-        pb.finish_with_message(format!(
-            "削除対象（ファイル {} · フォルダ {}）",
-            files.len(),
-            dirs.len()
-        ));
-    }
-
-    let file_pb = multi.and_then(|m| {
-        if files.is_empty() {
-            return None;
-        }
-        let pb = m.add(ProgressBar::new(files.len() as u64));
-        pb.set_style(style_bar("ファイル"));
-        pb.set_message("削除中");
-        Some(pb)
-    });
-
-    let file_errors = delete_files_parallel(&files, &pool, file_pb.clone());
-
-    if let Some(pb) = file_pb {
-        if file_errors.is_empty() {
-            pb.finish_with_message("ファイルを削除しました");
-        } else {
-            pb.abandon_with_message(format!("ファイル削除で {} 件失敗", file_errors.len()));
-        }
-    }
-
-    let dir_pb = multi.and_then(|m| {
-        if dirs.is_empty() {
-            return None;
-        }
-        let pb = m.add(ProgressBar::new(dirs.len() as u64));
-        pb.set_style(style_bar("フォルダ"));
-        pb.set_message("削除中");
-        Some(pb)
-    });
-
-    let mut dir_errors = delete_dirs_by_depth(&dirs, &pool, dir_pb.clone());
-
-    if let Some(pb) = dir_pb {
-        if dir_errors.is_empty() {
-            pb.finish_with_message("フォルダを削除しました");
-        } else {
-            pb.abandon_with_message(format!("フォルダ削除で {} 件失敗", dir_errors.len()));
-        }
-    }
-
-    if remove_root {
-        match std::fs::remove_dir(root) {
-            Ok(()) => {
-                if let Some(m) = multi {
-                    let _ = m.println(format!("ルートを削除しました — {}", root.display()));
-                }
-            }
-            Err(e) => dir_errors.push((root.to_path_buf(), e)),
-        }
-    }
-
-    RunOutcome::Done {
-        file_errors,
-        dir_errors,
-    }
-}
+const OK: u8 = 0;
+const FAILED: u8 = 1;
+const USAGE: u8 = 2;
+const ABORTED: u8 = 3;
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    let from_explorer = launch::launched_from_explorer();
 
-    match &cli.command {
-        Some(MenuCmd::InstallContextMenu) => {
-            return match context_menu::install() {
-                Ok(()) => {
-                    eprintln!("登録しました。エクスプローラーでフォルダを右クリックしてください。");
-                    eprintln!("（Windows 11 では [さらに表示] の中に出ることがあります）");
-                    eprintln!("実行ファイルを移動した際は、もう一度 install-context-menu を実行してください。");
-                    std::process::ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("登録に失敗しました: {e}");
-                    std::process::ExitCode::from(1)
-                }
-            };
-        }
-        Some(MenuCmd::UninstallContextMenu) => {
-            return match context_menu::uninstall() {
-                Ok(()) => {
-                    eprintln!("右クリックの登録を消しました。");
-                    std::process::ExitCode::SUCCESS
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    eprintln!("登録が見つかりませんでした（未登録か、すでに削除済み）。");
-                    std::process::ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("登録の削除に失敗しました: {e}");
-                    std::process::ExitCode::from(1)
-                }
-            };
-        }
-        None => {}
+    let code = match cli.command {
+        Some(MenuCmd::InstallContextMenu) => match context_menu::install() {
+            Ok(()) => {
+                eprintln!("登録しました。エクスプローラーでフォルダを右クリックしてください。");
+                eprintln!("（Windows 11 では [その他のオプションを確認] の中に出ることがあります）");
+                eprintln!("実行ファイルを移動した際は、もう一度 install-context-menu を実行してください。");
+                OK
+            }
+            Err(e) => {
+                eprintln!("登録に失敗しました: {e}");
+                FAILED
+            }
+        },
+        Some(MenuCmd::UninstallContextMenu) => match context_menu::uninstall() {
+            Ok(()) => {
+                eprintln!("右クリックの登録を消しました。");
+                OK
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("登録が見つかりませんでした（未登録か、すでに削除済み）。");
+                OK
+            }
+            Err(e) => {
+                eprintln!("登録の削除に失敗しました: {e}");
+                FAILED
+            }
+        },
+        Some(MenuCmd::ContextMenuRun { path }) => match context_menu::collect_batch(&path) {
+            Ok(Some(paths)) => run_delete(
+                &DeleteOptions {
+                    paths,
+                    remove_root: true,
+                    pause: true,
+                    ..Default::default()
+                },
+                false,
+            ),
+            Ok(None) => return std::process::ExitCode::SUCCESS, // 別のプロセスがまとめて処理する
+            Err(e) => {
+                eprintln!("右クリックからの起動に失敗しました: {e}");
+                pause();
+                FAILED
+            }
+        },
+        None => run_delete(&cli.del, from_explorer),
+    };
+    std::process::ExitCode::from(code)
+}
+
+fn run_delete(del: &DeleteOptions, from_explorer: bool) -> u8 {
+    let code = delete_flow(del, from_explorer);
+    if (del.pause || from_explorer) && (code == FAILED || code == USAGE) {
+        pause();
     }
+    code
+}
 
-    if cli.del.paths.is_empty() {
+fn pause() {
+    eprint!("Enter キーで閉じます…");
+    let _ = std::io::stdin().lock().read_line(&mut String::new());
+}
+
+fn delete_flow(del: &DeleteOptions, from_explorer: bool) -> u8 {
+    if del.paths.is_empty() {
         eprintln!("削除するフォルダの PATH を 1 つ以上指定するか、サブコマンドを使ってください。");
         eprintln!("例: yeetdir install-context-menu");
-        return std::process::ExitCode::from(2);
+        return USAGE;
     }
 
-    let use_progress = !cli.del.no_progress
-        && (cli.del.progress || std::io::stderr().is_terminal());
+    let remove_root = del.remove_root || (from_explorer && !del.contents_only);
 
-    let threads = cli
-        .del
+    let mut any_fail = false;
+    let mut targets = Vec::new();
+    for p in &del.paths {
+        match delete::check_root(p) {
+            Ok(c) => targets.push(c),
+            Err(msg) => {
+                eprintln!("{msg}: {}", p.display());
+                any_fail = true;
+            }
+        }
+    }
+    if targets.is_empty() {
+        return FAILED;
+    }
+
+    if !del.yes && !confirm(&targets, remove_root) {
+        eprintln!("中止しました。");
+        return ABORTED;
+    }
+
+    let threads = del
         .jobs
         .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
         .unwrap_or(4)
         .max(1);
-
-    let pool = match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+    // 再帰で深く潜るので、スタックは大きめにとる(予約だけで実メモリは使わない)
+    let pool = match rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .stack_size(16 << 20)
+        .build()
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("スレッドプールを起動できませんでした: {e}");
-            return std::process::ExitCode::from(1);
+            return FAILED;
         }
     };
 
-    let multi = use_progress.then(MultiProgress::new);
+    let use_progress = !del.no_progress && (del.progress || std::io::stderr().is_terminal());
 
-    let from_explorer = launch::launched_from_explorer();
-    let remove_root = cli.del.remove_root || (from_explorer && !cli.del.contents_only);
-
-    let mut any_fail = false;
-
-    for root in &cli.del.paths {
-        if !root.exists() {
-            eprintln!("そのパスはありません: {}", root.display());
+    for root in &targets {
+        let shown = delete::display(root);
+        // 確認を待つ間にリンクへ差し替えられていないか、消す直前にもう一度見る
+        if delete::check_root(root).as_ref() != Ok(root) {
+            eprintln!("確認のあとでフォルダが変わったため、削除しませんでした: {shown}");
             any_fail = true;
             continue;
         }
-        if !root.is_dir() {
-            eprintln!("フォルダを指定してください: {}", root.display());
-            any_fail = true;
-            continue;
-        }
+        let pb = use_progress.then(|| {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::with_template("{spinner:.green.bold} [{elapsed_precise}] {msg} · 削除 {human_pos} 件")
+                    .unwrap(),
+            );
+            pb.set_message(shown.clone());
+            pb.enable_steady_tick(Duration::from_millis(80));
+            pb
+        });
 
-        if let Some(m) = &multi {
-            let _ = m.println(format!("── {}", root.display()));
-        }
-
-        match run_delete_one(
-            root,
-            remove_root,
-            &pool,
-            multi.as_ref(),
-        ) {
-            RunOutcome::EnumerateFailed { root, error } => {
-                eprintln!("フォルダの読み取りに失敗しました — {}\n    {error}", root.display());
-                any_fail = true;
-            }
-            RunOutcome::Done {
-                mut file_errors,
-                mut dir_errors,
-            } => {
-                any_fail |= !file_errors.is_empty() || !dir_errors.is_empty();
-                for (p, e) in file_errors.drain(..) {
-                    eprintln!("ファイル削除できませんでした — {}\n    {e}", p.display());
-                }
-                for (p, e) in dir_errors.drain(..) {
-                    eprintln!("フォルダ削除できませんでした — {}\n    {e}", p.display());
-                }
+        let errors = delete::Errors::default();
+        let mut ok = pool.install(|| delete::remove_contents(root, pb.as_ref(), &errors));
+        let mut errors = errors.into_inner().unwrap();
+        if ok && remove_root {
+            if let Err(e) = delete::remove_dir(root) {
+                errors.push((root.clone(), e));
+                ok = false;
             }
         }
-    }
 
-    if !any_fail && use_progress {
-        if let Some(m) = &multi {
-            let _ = m.println("完了");
+        if let Some(pb) = pb {
+            if ok {
+                pb.finish_with_message(format!("{shown} — 削除しました"));
+            } else {
+                pb.abandon_with_message(format!("{shown} — {} 件失敗", errors.len()));
+            }
         }
+        for (p, e) in &errors {
+            eprintln!("削除できませんでした — {}\n    {e}", delete::display(p));
+        }
+        any_fail |= !ok;
     }
 
     if any_fail {
-        std::process::ExitCode::from(1)
+        FAILED
     } else {
-        std::process::ExitCode::SUCCESS
+        if use_progress {
+            eprintln!("完了");
+        }
+        OK
+    }
+}
+
+/// 対象を表示して y/N を聞く。入力できない環境では安全側に倒して中止する。
+fn confirm(targets: &[PathBuf], remove_root: bool) -> bool {
+    let what = if remove_root { "フォルダごと" } else { "中身だけ" };
+    eprintln!("次のフォルダを{what}削除します。ゴミ箱には入りません。");
+    for t in targets {
+        eprintln!("  {}", delete::display(t));
+    }
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        eprintln!("確認の入力ができないため中止します。確認なしで消すには --yes を付けてください。");
+        return false;
+    }
+    eprint!("よろしいですか? [y/N]: ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    stdin.lock().read_line(&mut answer).is_ok() && is_yes(&answer)
+}
+
+fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::delete::tests::TempDir;
+
+    #[test]
+    fn is_yes_accepts_only_explicit_yes() {
+        assert!(is_yes("y\r\n"));
+        assert!(is_yes(" YES "));
+        assert!(!is_yes(""));
+        assert!(!is_yes("n"));
+        assert!(!is_yes("yeah"));
+    }
+
+    #[test]
+    fn delete_flow_with_yes_removes_root_or_contents() {
+        let t = TempDir::new("flow");
+        let a = t.0.join("a");
+        std::fs::create_dir_all(a.join("sub")).unwrap();
+        std::fs::write(a.join("sub/f"), "x").unwrap();
+        let opts = |remove_root| DeleteOptions {
+            paths: vec![a.clone()],
+            remove_root,
+            yes: true,
+            no_progress: true,
+            ..Default::default()
+        };
+        assert_eq!(delete_flow(&opts(false), false), OK);
+        assert!(a.exists());
+        assert_eq!(std::fs::read_dir(&a).unwrap().count(), 0);
+        assert_eq!(delete_flow(&opts(true), false), OK);
+        assert!(!a.exists());
+    }
+
+    #[test]
+    fn delete_flow_fails_for_missing_path_and_empty_args() {
+        let t = TempDir::new("flow-missing");
+        let opts = DeleteOptions {
+            paths: vec![t.0.join("nope")],
+            yes: true,
+            no_progress: true,
+            ..Default::default()
+        };
+        assert_eq!(delete_flow(&opts, false), FAILED);
+        assert_eq!(delete_flow(&DeleteOptions::default(), false), USAGE);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_flow_refuses_junction_root_and_keeps_target() {
+        let t = TempDir::new("flow-junc");
+        let target = t.0.join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), "x").unwrap();
+        let st = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(t.0.join("link"))
+            .arg(&target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let opts = DeleteOptions {
+            paths: vec![t.0.join("link")],
+            remove_root: true,
+            yes: true,
+            no_progress: true,
+            ..Default::default()
+        };
+        assert_eq!(delete_flow(&opts, false), FAILED);
+        assert!(target.join("keep.txt").exists());
+        assert!(t.0.join("link").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_flow_reports_failure_when_root_cannot_be_removed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let t = TempDir::new("flow-busy");
+        let a = t.0.join("busy");
+        std::fs::create_dir(&a).unwrap();
+        // 削除を許さない共有モードでフォルダを開いたままにする
+        let _hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2) // READ | WRITE(DELETE なし)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&a)
+            .unwrap();
+        let opts = DeleteOptions {
+            paths: vec![a.clone()],
+            remove_root: true,
+            yes: true,
+            no_progress: true,
+            ..Default::default()
+        };
+        assert_eq!(delete_flow(&opts, false), FAILED);
+        assert!(a.exists());
+    }
+
+    #[test]
+    fn cli_parses_flags_and_hidden_subcommand() {
+        let cli = Cli::try_parse_from(["yeetdir", "-y", "-r", "--pause", "C:\\x"]).unwrap();
+        assert!(cli.del.yes && cli.del.remove_root && cli.del.pause);
+        let cli = Cli::try_parse_from(["yeetdir", "context-menu-run", "C:\\x"]).unwrap();
+        assert!(matches!(cli.command, Some(MenuCmd::ContextMenuRun { .. })));
+        assert!(Cli::try_parse_from(["yeetdir", "-r", "--contents-only", "C:\\x"]).is_err());
     }
 }
