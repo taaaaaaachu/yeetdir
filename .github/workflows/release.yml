@@ -30,7 +30,8 @@ jobs:
           New-Item -ItemType Directory $name | Out-Null
           Copy-Item target/release/yeetdir.exe, README.md, LICENSE $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
-          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$PWD/$name.zip.sha256", "$hash  $name.zip`n") # sha256sum -c で読めるよう LF
 
       - name: GitHub Release を作る
         shell: pwsh
