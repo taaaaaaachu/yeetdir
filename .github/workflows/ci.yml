@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.rust }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, "1.85"] # 1.85 は Cargo.toml の rust-version
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal -c clippy,rustfmt && rustup default ${{ matrix.rust }}
+      - run: cargo fmt --check
+        if: matrix.rust == 'stable'
+      - run: cargo clippy --all-targets --locked -- -D warnings
+        if: matrix.rust == 'stable'
+      - run: cargo test --locked

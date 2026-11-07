@@ -1,5 +1,7 @@
 # yeetdir
 
+[![CI](https://github.com/taaaaaaachu/yeetdir/actions/workflows/ci.yml/badge.svg)](https://github.com/taaaaaaachu/yeetdir/actions/workflows/ci.yml)
+
 `yeetdir` は、指定したフォルダの中身を並列で削除する Windows 向け CLI です。
 エクスプローラーの右クリックメニューに登録すると、フォルダを選んでそのまま削除できます。
 
@@ -13,6 +15,10 @@
 - ジャンクションやシンボリックリンクはたどらず、リンク自体だけを消します。リンクを削除対象として直接指定した場合は拒否します。
 - ドライブのルート、ユーザーフォルダ、`C:\Windows`、`Program Files`、`ProgramData`、`AppData` と、それらの祖先(`C:\Users` など)は削除できません。
 - ファイルの一覧を取ってから消すまでの間に、途中のフォルダをリンクへ差し替えられると、木の外を消せてしまいます。ほかのユーザーが書き込めるフォルダを、管理者権限で消すことは避けてください。
+
+## 入手
+
+[Releases](https://github.com/taaaaaaachu/yeetdir/releases) から `yeetdir-<版>-x86_64-pc-windows-msvc.zip` をダウンロードし、中の `yeetdir.exe` を好きな場所に置いてください。
 
 ## ビルド
 
