@@ -79,7 +79,9 @@ fn main() -> std::process::ExitCode {
         Some(MenuCmd::InstallContextMenu) => match context_menu::install() {
             Ok(()) => {
                 eprintln!("登録しました。エクスプローラーでフォルダを右クリックしてください。");
-                eprintln!("（Windows 11 では [その他のオプションを確認] の中に出ることがあります）");
+                eprintln!(
+                    "（Windows 11 では [その他のオプションを確認] の中に出ることがあります）"
+                );
                 eprintln!("実行ファイルを移動した際は、もう一度 install-context-menu を実行してください。");
                 OK
             }
@@ -197,8 +199,10 @@ fn delete_flow(del: &DeleteOptions, from_explorer: bool) -> u8 {
         let pb = use_progress.then(|| {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
-                ProgressStyle::with_template("{spinner:.green.bold} [{elapsed_precise}] {msg} · 削除 {human_pos} 件")
-                    .unwrap(),
+                ProgressStyle::with_template(
+                    "{spinner:.green.bold} [{elapsed_precise}] {msg} · 削除 {human_pos} 件",
+                )
+                .unwrap(),
             );
             pb.set_message(shown.clone());
             pb.enable_steady_tick(Duration::from_millis(80));
@@ -240,14 +244,20 @@ fn delete_flow(del: &DeleteOptions, from_explorer: bool) -> u8 {
 
 /// 対象を表示して y/N を聞く。入力できない環境では安全側に倒して中止する。
 fn confirm(targets: &[PathBuf], remove_root: bool) -> bool {
-    let what = if remove_root { "フォルダごと" } else { "中身だけ" };
+    let what = if remove_root {
+        "フォルダごと"
+    } else {
+        "中身だけ"
+    };
     eprintln!("次のフォルダを{what}削除します。ゴミ箱には入りません。");
     for t in targets {
         eprintln!("  {}", delete::display(t));
     }
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
-        eprintln!("確認の入力ができないため中止します。確認なしで消すには --yes を付けてください。");
+        eprintln!(
+            "確認の入力ができないため中止します。確認なしで消すには --yes を付けてください。"
+        );
         return false;
     }
     eprint!("よろしいですか? [y/N]: ");

@@ -22,7 +22,10 @@ pub fn install() -> io::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "この機能は Windows 専用です"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "この機能は Windows 専用です",
+        ))
     }
 }
 
@@ -33,7 +36,10 @@ pub fn uninstall() -> io::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "この機能は Windows 専用です"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "この機能は Windows 専用です",
+        ))
     }
 }
 
@@ -108,7 +114,11 @@ fn data_dir() -> PathBuf {
 /// 右クリックから起動されたときに呼ぶ。リーダーになったら、まとめた削除対象を返す。
 /// 他のプロセスがまとめて処理するなら `None`。
 pub fn collect_batch(path: &Path) -> io::Result<Option<Vec<PathBuf>>> {
-    collect_batch_in(&data_dir().join("context-menu-queue"), path, Duration::from_millis(900))
+    collect_batch_in(
+        &data_dir().join("context-menu-queue"),
+        path,
+        Duration::from_millis(900),
+    )
 }
 
 fn collect_batch_in(dir: &Path, path: &Path, settle: Duration) -> io::Result<Option<Vec<PathBuf>>> {
@@ -125,7 +135,9 @@ fn collect_batch_in(dir: &Path, path: &Path, settle: Duration) -> io::Result<Opt
             loop {
                 let (fresh, stale) = drain(dir, SystemTime::now())?;
                 if stale > 0 {
-                    eprintln!("以前の操作で取り残された削除対象 {stale} 件は処理せずに捨てました。");
+                    eprintln!(
+                        "以前の操作で取り残された削除対象 {stale} 件は処理せずに捨てました。"
+                    );
                 }
                 if fresh.is_empty() {
                     break;
@@ -145,7 +157,9 @@ fn collect_batch_in(dir: &Path, path: &Path, settle: Duration) -> io::Result<Opt
             // 消せたら誰にも拾われていない。消せなければ(NotFound)ちょうどリーダーが拾った
             return match fs::remove_file(&item) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-                _ => Err(io::Error::other("ほかの yeetdir の処理待ちがタイムアウトしました")),
+                _ => Err(io::Error::other(
+                    "ほかの yeetdir の処理待ちがタイムアウトしました",
+                )),
             };
         }
     }
@@ -173,7 +187,9 @@ fn drain(dir: &Path, now: SystemTime) -> io::Result<(Vec<PathBuf>, usize)> {
     let mut items = Vec::new();
     for entry in fs::read_dir(dir)?.filter_map(|e| e.ok()) {
         let p = entry.path();
-        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else { continue };
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
         match p.extension().and_then(|e| e.to_str()) {
             Some("path") => items.push((modified, p)),
             // 書いている途中で落ちたプロセスの残骸
@@ -219,13 +235,19 @@ fn try_lock(dir: &Path) -> io::Result<Option<fs::File>> {
 #[cfg(windows)]
 fn path_to_bytes(p: &Path) -> Vec<u8> {
     use std::os::windows::ffi::OsStrExt;
-    p.as_os_str().encode_wide().flat_map(u16::to_le_bytes).collect()
+    p.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
 }
 
 #[cfg(windows)]
 fn bytes_to_path(b: &[u8]) -> PathBuf {
     use std::os::windows::ffi::OsStringExt;
-    let wide: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let wide: Vec<u16> = b
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
     std::ffi::OsString::from_wide(&wide).into()
 }
 
@@ -337,8 +359,12 @@ mod tests {
             .map(|i| {
                 let dir = dir.clone();
                 thread::spawn(move || {
-                    collect_batch_in(&dir, &PathBuf::from(format!(r"C:\p{i}")), Duration::from_millis(50))
-                        .unwrap()
+                    collect_batch_in(
+                        &dir,
+                        &PathBuf::from(format!(r"C:\p{i}")),
+                        Duration::from_millis(50),
+                    )
+                    .unwrap()
                 })
             })
             .collect();

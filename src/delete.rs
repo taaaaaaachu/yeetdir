@@ -26,7 +26,10 @@ pub fn check_root(root: &Path) -> Result<PathBuf, String> {
     let canon = fs::canonicalize(root).map_err(|e| format!("パスを解決できませんでした({e})"))?;
     let (exact, subtree) = protected_dirs();
     if let Some(p) = protected_hit(&canon, &exact, &subtree) {
-        return Err(format!("保護対象のフォルダ({})を含むため削除できません", display(&p)));
+        return Err(format!(
+            "保護対象のフォルダ({})を含むため削除できません",
+            display(&p)
+        ));
     }
     Ok(canon)
 }
@@ -68,7 +71,14 @@ fn protected_dirs() -> (Vec<PathBuf>, Vec<PathBuf>) {
     .filter_map(|k| env(k))
     .collect();
     if let Some(home) = env("USERPROFILE") {
-        for name in ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"] {
+        for name in [
+            "Desktop",
+            "Documents",
+            "Downloads",
+            "Pictures",
+            "Music",
+            "Videos",
+        ] {
             exact.push(home.join(name));
         }
         // ほかのユーザーのプロファイル(Public / Default も含む)
@@ -76,11 +86,18 @@ fn protected_dirs() -> (Vec<PathBuf>, Vec<PathBuf>) {
             exact.extend(rd.filter_map(|e| e.ok()).map(|e| e.path()));
         }
     }
-    let subtree: Vec<PathBuf> = ["SystemRoot", "windir"].iter().filter_map(|k| env(k)).collect();
+    let subtree: Vec<PathBuf> = ["SystemRoot", "windir"]
+        .iter()
+        .filter_map(|k| env(k))
+        .collect();
     if cfg!(windows) && (subtree.is_empty() || env("USERPROFILE").is_none()) {
         eprintln!("警告: SystemRoot / USERPROFILE が取れないため、保護対象の判定が不完全です。");
     }
-    let canon = |v: Vec<PathBuf>| v.into_iter().filter_map(|p| fs::canonicalize(p).ok()).collect();
+    let canon = |v: Vec<PathBuf>| {
+        v.into_iter()
+            .filter_map(|p| fs::canonicalize(p).ok())
+            .collect()
+    };
     (canon(exact), canon(subtree))
 }
 
@@ -178,12 +195,15 @@ fn remove_link_or_file(path: &Path, ft: FileType) -> io::Result<()> {
 fn clear_readonly_on_denied(path: &Path, f: impl Fn() -> io::Result<()>) -> io::Result<()> {
     match f() {
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-            let Ok(meta) = fs::symlink_metadata(path) else { return Err(e) };
+            let Ok(meta) = fs::symlink_metadata(path) else {
+                return Err(e);
+            };
             let mut perm = meta.permissions();
             if meta.file_type().is_symlink() || !perm.readonly() {
                 return Err(e);
             }
-            #[allow(clippy::permissions_set_readonly_false)] // Windows の読み取り専用属性を外すだけ
+            #[allow(clippy::permissions_set_readonly_false)]
+            // Windows の読み取り専用属性を外すだけ
             perm.set_readonly(false);
             fs::set_permissions(path, perm)?;
             f()
@@ -322,7 +342,9 @@ pub(crate) mod tests {
         fs::create_dir(&target).unwrap();
         fs::write(target.join("keep.txt"), "x").unwrap();
         junction(&t.0.join("link"), &target);
-        assert!(check_root(&t.0.join("link")).unwrap_err().contains("リンク"));
+        assert!(check_root(&t.0.join("link"))
+            .unwrap_err()
+            .contains("リンク"));
         assert!(target.join("keep.txt").exists());
     }
 

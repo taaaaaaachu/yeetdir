@@ -41,16 +41,22 @@ fn concurrent_processes_are_batched_without_loss() {
     for c in children {
         let out = c.wait_with_output().unwrap();
         match out.status.code() {
-            Some(0) => {}       // フォロワー
+            Some(0) => {}            // フォロワー
             Some(3) => leaders += 1, // リーダー(入力がないので中止)
-            other => panic!("想定外の終了コード {other:?}: {}", String::from_utf8_lossy(&out.stderr)),
+            other => panic!(
+                "想定外の終了コード {other:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
         }
         stderr.push_str(&String::from_utf8_lossy(&out.stderr));
     }
 
     assert!(leaders >= 1);
     for d in &dirs {
-        let shown = fs::canonicalize(d).unwrap().to_string_lossy().replace(r"\\?\", "");
+        let shown = fs::canonicalize(d)
+            .unwrap()
+            .to_string_lossy()
+            .replace(r"\\?\", "");
         let n = stderr.lines().filter(|l| l.trim() == shown).count();
         assert_eq!(n, 1, "{shown} が確認に出た回数\n{stderr}");
         assert!(d.join("f.txt").exists());

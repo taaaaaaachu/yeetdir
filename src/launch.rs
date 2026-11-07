@@ -80,7 +80,11 @@ mod tests {
 
     #[test]
     fn other_or_missing_parent_is_false() {
-        let procs = [p(1, 0, "pwsh.exe"), p(2, 1, "yeetdir.exe"), p(3, 99, "yeetdir.exe")];
+        let procs = [
+            p(1, 0, "pwsh.exe"),
+            p(2, 1, "yeetdir.exe"),
+            p(3, 99, "yeetdir.exe"),
+        ];
         assert!(!parent_is_explorer(&procs, 2));
         assert!(!parent_is_explorer(&procs, 3));
         assert!(!parent_is_explorer(&procs, 42));
