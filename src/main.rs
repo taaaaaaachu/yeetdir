@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -197,13 +197,21 @@ fn delete_flow(del: &DeleteOptions, from_explorer: bool) -> u8 {
             continue;
         }
         let pb = use_progress.then(|| {
-            let pb = ProgressBar::new_spinner();
+            // 全体の件数は削除しながら見つけた分だけ増えていく
+            let pb = ProgressBar::new(0);
             pb.set_style(
                 ProgressStyle::with_template(
-                    "{spinner:.green.bold} [{elapsed_precise}] {msg} · 削除 {human_pos} 件",
+                    "{spinner:.green.bold} [{elapsed_precise}] [{bar:30.cyan/blue}] 削除 {human_pos} / 発見 {human_len} 件 {wide_msg}",
                 )
-                .unwrap(),
+                .unwrap()
+                .progress_chars("=>-"),
             );
+            if !std::io::stderr().is_terminal() {
+                // 既定の出力先は端末でないと描画しないので、--progress のときは無条件に描く出力先にする
+                pb.set_draw_target(ProgressDrawTarget::term_like(Box::new(
+                    console::Term::stderr(),
+                )));
+            }
             pb.set_message(shown.clone());
             pb.enable_steady_tick(Duration::from_millis(80));
             pb

@@ -137,6 +137,10 @@ pub fn remove_contents(dir: &Path, pb: Option<&ProgressBar>, errors: &Errors) ->
             }
         }
     }
+    // 見つけた分だけ全体の件数を増やす(事前の走査はしない)
+    if let Some(pb) = pb {
+        pb.inc_length(items.len() as u64);
+    }
     let all = items
         .par_iter()
         .map(|(path, ft)| remove_entry(path, *ft, pb, errors))
@@ -292,6 +296,21 @@ pub(crate) mod tests {
         assert!(ok, "{errs:?}");
         assert!(t.0.exists());
         assert_eq!(fs::read_dir(&t.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn progress_length_grows_with_discovered_entries() {
+        let t = TempDir::new("progress");
+        fs::create_dir_all(t.0.join("a/b")).unwrap();
+        fs::write(t.0.join("a/b/f1"), "x").unwrap();
+        fs::write(t.0.join("a/f2"), "x").unwrap();
+        fs::write(t.0.join("f3"), "x").unwrap();
+        let pb = ProgressBar::with_draw_target(Some(0), indicatif::ProgressDrawTarget::hidden());
+        let errors = Errors::default();
+        assert!(remove_contents(&t.0, Some(&pb), &errors));
+        // a, a/b, a/b/f1, a/f2, f3
+        assert_eq!(pb.length(), Some(5));
+        assert_eq!(pb.position(), 5);
     }
 
     #[test]
