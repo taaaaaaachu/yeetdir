@@ -2,6 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 mod context_menu;
@@ -197,11 +198,11 @@ fn delete_flow(del: &DeleteOptions, from_explorer: bool) -> u8 {
             continue;
         }
         let pb = use_progress.then(|| {
-            // 全体の件数は削除しながら見つけた分だけ増えていく
+            // 全体の件数は、削除と並行して数えながら増えていく
             let pb = ProgressBar::new(0);
             pb.set_style(
                 ProgressStyle::with_template(
-                    "{spinner:.green.bold} [{elapsed_precise}] [{bar:30.cyan/blue}] 削除 {human_pos} / 発見 {human_len} 件 {wide_msg}",
+                    "{spinner:.green.bold} [{elapsed_precise}] [{bar:30.cyan/blue}] 削除 {human_pos} / {human_len} 件 {wide_msg}",
                 )
                 .unwrap()
                 .progress_chars("=>-"),
@@ -214,11 +215,19 @@ fn delete_flow(del: &DeleteOptions, from_explorer: bool) -> u8 {
             }
             pb.set_message(shown.clone());
             pb.enable_steady_tick(Duration::from_millis(80));
-            pb
+            delete::Progress::new(pb)
         });
 
         let errors = delete::Errors::default();
-        let mut ok = pool.install(|| delete::remove_contents(root, pb.as_ref(), &errors));
+        let stop = AtomicBool::new(false);
+        let mut ok = std::thread::scope(|s| {
+            if let Some(p) = &pb {
+                s.spawn(|| delete::count_tree(root, p, &stop));
+            }
+            let ok = pool.install(|| delete::remove_contents(root, pb.as_ref(), &errors));
+            stop.store(true, Ordering::Relaxed);
+            ok
+        });
         let mut errors = errors.into_inner().unwrap();
         if ok && remove_root {
             if let Err(e) = delete::remove_dir(root) {
@@ -227,8 +236,9 @@ fn delete_flow(del: &DeleteOptions, from_explorer: bool) -> u8 {
             }
         }
 
-        if let Some(pb) = pb {
+        if let Some(pb) = pb.map(|p| p.bar) {
             if ok {
+                pb.set_length(pb.position()); // 見積もりを確定値にする
                 pb.finish_with_message(format!("{shown} — 削除しました"));
             } else {
                 pb.abandon_with_message(format!("{shown} — {} 件失敗", errors.len()));

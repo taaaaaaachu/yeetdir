@@ -5,10 +5,68 @@ use rayon::prelude::*;
 use std::fs::{self, FileType};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 pub type Errors = Mutex<Vec<(PathBuf, io::Error)>>;
+
+/// 進捗バーと、全体の件数の 2 つの見積もり。
+/// 全体の件数は「削除側が見つけた数」と「数える専用スレッドの数」の大きい方にする
+/// (足すと二重に数えてしまうため)。
+pub struct Progress {
+    pub bar: ProgressBar,
+    found: AtomicU64,
+    counted: AtomicU64,
+}
+
+impl Progress {
+    pub fn new(bar: ProgressBar) -> Self {
+        Progress {
+            bar,
+            found: AtomicU64::new(0),
+            counted: AtomicU64::new(0),
+        }
+    }
+
+    fn found(&self, n: u64) {
+        self.found.fetch_add(n, Ordering::Relaxed);
+        self.update_length();
+    }
+
+    fn update_length(&self) {
+        let len = self
+            .found
+            .load(Ordering::Relaxed)
+            .max(self.counted.load(Ordering::Relaxed));
+        // 別スレッドが小さい値で上書きしても、次の更新で直る
+        if self.bar.length().is_none_or(|l| l < len) {
+            self.bar.set_length(len);
+        }
+    }
+}
+
+/// `root` の下を件数だけ数える(削除と並行して走らせる)。`stop` が立ったら途中でやめる。
+/// 幅優先なので、深さ優先で進む削除側より先に、浅い所から全体を見渡せる。
+/// 削除側が先に消したフォルダは読めないが、その分は削除側が見つけているので問題ない。
+pub fn count_tree(root: &Path, progress: &Progress, stop: &AtomicBool) {
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = queue.pop_front() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        let mut n = 0;
+        for e in rd.filter_map(|e| e.ok()) {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            n += 1;
+            if e.file_type().is_ok_and(|ft| ft.is_dir()) {
+                queue.push_back(e.path());
+            }
+        }
+        progress.counted.fetch_add(n, Ordering::Relaxed);
+        progress.update_length();
+    }
+}
 
 /// 削除対象として指定されたパスを検査し、正規化した絶対パス(`\\?\` 形式)を返す。
 /// リンク・ファイル・保護対象のフォルダ(とその祖先)は拒否する。
@@ -118,7 +176,7 @@ pub fn display(p: &Path) -> String {
 /// 子が消せなかったフォルダは削除を試みない(「空ではありません」の連鎖を出さないため)。
 // ponytail: パス基準の削除なので、列挙後に途中のフォルダをリンクへ差し替えられると木の外を消せる(TOCTOU)。
 // 他人が書き込めるフォルダを管理者権限で消す用途が出たら、ハンドル相対の削除にする。
-pub fn remove_contents(dir: &Path, pb: Option<&ProgressBar>, errors: &Errors) -> bool {
+pub fn remove_contents(dir: &Path, pb: Option<&Progress>, errors: &Errors) -> bool {
     let entries = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) => {
@@ -137,9 +195,9 @@ pub fn remove_contents(dir: &Path, pb: Option<&ProgressBar>, errors: &Errors) ->
             }
         }
     }
-    // 見つけた分だけ全体の件数を増やす(事前の走査はしない)
+    // 見つけた分を全体の件数に反映する
     if let Some(pb) = pb {
-        pb.inc_length(items.len() as u64);
+        pb.found(items.len() as u64);
     }
     let all = items
         .par_iter()
@@ -154,7 +212,7 @@ pub fn remove_dir(path: &Path) -> io::Result<()> {
     retry(|| clear_readonly_on_denied(path, || fs::remove_dir(path)))
 }
 
-fn remove_entry(path: &Path, ft: FileType, pb: Option<&ProgressBar>, errors: &Errors) -> bool {
+fn remove_entry(path: &Path, ft: FileType, pb: Option<&Progress>, errors: &Errors) -> bool {
     // FileType はリンクをたどらないので、リンクの is_dir() は false になる
     let result = if ft.is_dir() {
         if !remove_contents(path, pb, errors) {
@@ -167,7 +225,7 @@ fn remove_entry(path: &Path, ft: FileType, pb: Option<&ProgressBar>, errors: &Er
     match result {
         Ok(()) => {
             if let Some(pb) = pb {
-                pb.inc(1);
+                pb.bar.inc(1);
             }
             true
         }
@@ -305,12 +363,30 @@ pub(crate) mod tests {
         fs::write(t.0.join("a/b/f1"), "x").unwrap();
         fs::write(t.0.join("a/f2"), "x").unwrap();
         fs::write(t.0.join("f3"), "x").unwrap();
-        let pb = ProgressBar::with_draw_target(Some(0), indicatif::ProgressDrawTarget::hidden());
+        let hidden = || {
+            Progress::new(ProgressBar::with_draw_target(
+                Some(0),
+                indicatif::ProgressDrawTarget::hidden(),
+            ))
+        };
+
+        // 数える専用スレッドは、消さずに全体(a, a/b, a/b/f1, a/f2, f3)を数える
+        let counted = hidden();
+        count_tree(&t.0, &counted, &AtomicBool::new(false));
+        assert_eq!(counted.bar.length(), Some(5));
+
+        // 停止の合図が立っていれば何も数えない
+        let stopped = hidden();
+        count_tree(&t.0, &stopped, &AtomicBool::new(true));
+        assert_eq!(stopped.bar.length(), Some(0));
+
+        // 削除側が見つけた数と大きい方が全体になる(二重に数えない)
+        let pb = hidden();
+        pb.counted.store(5, Ordering::Relaxed);
         let errors = Errors::default();
         assert!(remove_contents(&t.0, Some(&pb), &errors));
-        // a, a/b, a/b/f1, a/f2, f3
-        assert_eq!(pb.length(), Some(5));
-        assert_eq!(pb.position(), 5);
+        assert_eq!(pb.bar.length(), Some(5));
+        assert_eq!(pb.bar.position(), 5);
     }
 
     #[test]
