@@ -23,6 +23,7 @@ enum MenuCmd {
 #[derive(Parser, Debug)]
 #[command(
     name = "yeetdir",
+    version,
     about = "フォルダの中身を並列で削除します（ゴミ箱には入りません）",
     args_conflicts_with_subcommands = true,
     after_help = "削除の前に対象を表示して確認します。確認なしで消すには --yes を付けてください。\n\
@@ -395,5 +396,14 @@ mod tests {
         let cli = Cli::try_parse_from(["yeetdir", "context-menu-run", "C:\\x"]).unwrap();
         assert!(matches!(cli.command, Some(MenuCmd::ContextMenuRun { .. })));
         assert!(Cli::try_parse_from(["yeetdir", "-r", "--contents-only", "C:\\x"]).is_err());
+    }
+
+    #[test]
+    fn version_flag_prints_package_version() {
+        for flag in ["--version", "-V"] {
+            let err = Cli::try_parse_from(["yeetdir", flag]).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+            assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
+        }
     }
 }
