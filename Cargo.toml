@@ -3,13 +3,14 @@ name = "yeetdir"
 version = "0.2.1"
 edition = "2021"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 console = "0.15"
 indicatif = "0.17"
 rayon = "1.10"
+self_update = { version = "1.3", default-features = false, features = ["ureq", "rustls", "github", "archive-zip", "compression-zip-deflate", "signatures"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

@@ -20,9 +20,15 @@
 
 [Releases](https://github.com/taaaaaaachu/yeetdir/releases) から `yeetdir-<版>-x86_64-pc-windows-msvc.zip` をダウンロードし、中の `yeetdir.exe` を好きな場所に置いてください。
 
+v0.3.0 以降は、次のコマンドで最新版に更新できます。ダウンロードした zip の署名を確かめてから、実行ファイルを置き換えます。右クリックメニューの登録はそのまま使えます。
+
+```powershell
+yeetdir self-update
+```
+
 ## ビルド
 
-Rust 1.85 以降が必要です。
+Rust 1.88 以降が必要です。
 
 ```powershell
 cargo build --release

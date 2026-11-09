@@ -8,6 +8,7 @@ use std::time::Duration;
 mod context_menu;
 mod delete;
 mod launch;
+mod update;
 
 #[derive(Subcommand, Debug, Clone)]
 enum MenuCmd {
@@ -15,6 +16,8 @@ enum MenuCmd {
     InstallContextMenu,
     /// 右クリックの登録を削除
     UninstallContextMenu,
+    /// GitHub Releases の最新版に自分自身を置き換える
+    SelfUpdate,
     /// 右クリックメニューから呼ばれる（複数選択をまとめて 1 回で処理する）
     #[command(hide = true)]
     ContextMenuRun { path: PathBuf },
@@ -31,7 +34,8 @@ enum MenuCmd {
 ドライブのルートやユーザーフォルダなどの保護対象と、その祖先は削除できません。\n\
 \n\
 Windows: エクスプローラーで yeetdir.exe にフォルダをドラッグすると、フォルダごと削除できます。\n\
-コンテキストメニューへの登録: yeetdir install-context-menu で登録、uninstall-context-menu で解除。"
+コンテキストメニューへの登録: yeetdir install-context-menu で登録、uninstall-context-menu で解除。
+最新版への更新: yeetdir self-update"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -103,6 +107,13 @@ fn main() -> std::process::ExitCode {
             }
             Err(e) => {
                 eprintln!("登録の削除に失敗しました: {e}");
+                FAILED
+            }
+        },
+        Some(MenuCmd::SelfUpdate) => match update::run() {
+            Ok(()) => OK,
+            Err(e) => {
+                eprintln!("更新に失敗しました: {e}");
                 FAILED
             }
         },
@@ -395,6 +406,8 @@ mod tests {
         assert!(cli.del.yes && cli.del.remove_root && cli.del.pause);
         let cli = Cli::try_parse_from(["yeetdir", "context-menu-run", "C:\\x"]).unwrap();
         assert!(matches!(cli.command, Some(MenuCmd::ContextMenuRun { .. })));
+        let cli = Cli::try_parse_from(["yeetdir", "self-update"]).unwrap();
+        assert!(matches!(cli.command, Some(MenuCmd::SelfUpdate)));
         assert!(Cli::try_parse_from(["yeetdir", "-r", "--contents-only", "C:\\x"]).is_err());
     }
 

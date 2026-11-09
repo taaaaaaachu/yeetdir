@@ -23,18 +23,24 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked
 
-      - name: パッケージを作る
+      - run: cargo install zipsign --locked --version 0.2.2
+
+      # self_update は名前に target を含む zip を探し、zipsign の署名を検証する
+      - name: パッケージを作って署名する
         shell: pwsh
+        env:
+          ZIPSIGN_PRIVATE_KEY: ${{ secrets.ZIPSIGN_PRIVATE_KEY }}
         run: |
           $name = "yeetdir-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory $name | Out-Null
           Copy-Item target/release/yeetdir.exe, README.md, LICENSE $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
-          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
-          [IO.File]::WriteAllText("$PWD/$name.zip.sha256", "$hash  $name.zip`n") # sha256sum -c で読めるよう LF
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP/signing.key", [Convert]::FromBase64String($env:ZIPSIGN_PRIVATE_KEY))
+          zipsign sign zip "$name.zip" "$env:RUNNER_TEMP/signing.key"
+          zipsign verify zip "$name.zip" signing-public.key
 
       - name: GitHub Release を作る
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME (Get-Item *.zip, *.zip.sha256) --title $env:GITHUB_REF_NAME --generate-notes --verify-tag
+        run: gh release create $env:GITHUB_REF_NAME (Get-Item *.zip) --title $env:GITHUB_REF_NAME --generate-notes --verify-tag

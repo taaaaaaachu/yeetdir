@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, "1.85"] # 1.85 は Cargo.toml の rust-version
+        rust: [stable, "1.88"] # 1.88 は Cargo.toml の rust-version
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install ${{ matrix.rust }} --profile minimal -c clippy,rustfmt && rustup default ${{ matrix.rust }}
