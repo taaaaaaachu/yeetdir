@@ -25,6 +25,11 @@ jobs:
 
       - run: cargo install zipsign --locked --version 0.2.2
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: cargo about generate about.hbs -o THIRD-PARTY-NOTICES.txt
+
       # self_update は名前に target を含む zip を探し、zipsign の署名を検証する
       - name: パッケージを作って署名する
         shell: pwsh
@@ -33,7 +38,7 @@ jobs:
         run: |
           $name = "yeetdir-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item target/release/yeetdir.exe, README.md, LICENSE $name
+          Copy-Item target/release/yeetdir.exe, README.md, LICENSE, THIRD-PARTY-NOTICES.txt $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP/signing.key", [Convert]::FromBase64String($env:ZIPSIGN_PRIVATE_KEY))
           zipsign sign zip "$name.zip" "$env:RUNNER_TEMP/signing.key"
