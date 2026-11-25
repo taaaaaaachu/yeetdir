@@ -8,7 +8,11 @@ permissions:
   contents: write
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -20,7 +24,6 @@ jobs:
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
           if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "タグ $env:GITHUB_REF_NAME と Cargo.toml の版 $version が一致しません" }
 
-      - run: cargo test --locked
       - run: cargo build --release --locked
 
       - run: cargo install zipsign --locked --version 0.2.2

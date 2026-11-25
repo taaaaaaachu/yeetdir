@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call: # Release から呼び、通ったときだけリリースする
 
 permissions:
   contents: read
