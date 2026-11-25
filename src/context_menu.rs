@@ -245,8 +245,10 @@ fn path_to_bytes(p: &Path) -> Vec<u8> {
 fn bytes_to_path(b: &[u8]) -> PathBuf {
     use std::os::windows::ffi::OsStringExt;
     let wide: Vec<u16> = b
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| u16::from_le_bytes(c))
         .collect();
     std::ffi::OsString::from_wide(&wide).into()
 }
